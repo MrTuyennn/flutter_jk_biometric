@@ -4,14 +4,14 @@
 #
 Pod::Spec.new do |s|
   s.name             = 'flutter_jk_biometric'
-  s.version          = '0.0.1'
+  s.version          = '1.0.0'
   s.summary          = 'Store a secret behind the device biometric sensor (Face ID/Touch ID/fingerprint).'
   s.description      = <<-DESC
 Stores a secret string behind a hardware-backed biometric prompt (Face ID/Touch ID on iOS, BiometricPrompt on Android).
                        DESC
-  s.homepage         = 'http://example.com'
+  s.homepage         = 'https://github.com/MrTuyennn/flutter_jk_biometric'
   s.license          = { :file => '../LICENSE' }
-  s.author           = { 'Your Company' => 'email@example.com' }
+  s.author           = { 'MrTuyennn' => 'nguyenngoctuyen188@gmail.com' }
   s.source           = { :path => '.' }
   s.source_files = 'flutter_jk_biometric/Sources/flutter_jk_biometric/**/*'
   s.dependency 'Flutter'
