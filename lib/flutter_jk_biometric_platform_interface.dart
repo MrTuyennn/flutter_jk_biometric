@@ -2,6 +2,7 @@ import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
 import 'flutter_jk_biometric_method_channel.dart';
 import 'src/biometric_availability.dart';
+import 'src/biometric_type.dart';
 
 abstract class FlutterJkBiometricPlatform extends PlatformInterface {
   /// Constructs a FlutterJkBiometricPlatform.
@@ -28,11 +29,18 @@ abstract class FlutterJkBiometricPlatform extends PlatformInterface {
     throw UnimplementedError('checkAvailability() has not been implemented.');
   }
 
+  Future<List<BiometricType>> getAvailableBiometrics() {
+    throw UnimplementedError(
+      'getAvailableBiometrics() has not been implemented.',
+    );
+  }
+
   Future<void> saveSecret({
     required String key,
     required String secret,
     required String reason,
     required String negativeButtonText,
+    bool allowDeviceCredential = false,
   }) {
     throw UnimplementedError('saveSecret() has not been implemented.');
   }
@@ -41,6 +49,7 @@ abstract class FlutterJkBiometricPlatform extends PlatformInterface {
     required String key,
     required String reason,
     required String negativeButtonText,
+    bool allowDeviceCredential = false,
   }) {
     throw UnimplementedError('readSecret() has not been implemented.');
   }
@@ -51,5 +60,9 @@ abstract class FlutterJkBiometricPlatform extends PlatformInterface {
 
   Future<void> deleteSecret({required String key}) {
     throw UnimplementedError('deleteSecret() has not been implemented.');
+  }
+
+  Future<bool> stopAuthentication() {
+    throw UnimplementedError('stopAuthentication() has not been implemented.');
   }
 }

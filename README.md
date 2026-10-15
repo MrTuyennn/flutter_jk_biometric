@@ -23,7 +23,7 @@ Add the dependency to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  flutter_jk_biometric: ^1.0.0
+  flutter_jk_biometric: ^1.0.1
 ```
 
 Or, until it's published on pub.dev, point straight at the GitHub repo:
@@ -105,10 +105,12 @@ each gets its own native Keystore/Keychain item. It's an identifier, not a secre
 it's stored unencrypted (as the Keystore alias / `SharedPreferences` entry name on
 Android, and as the Keychain account attribute on iOS) — don't put sensitive data in it.
 
-`negativeButtonText` only applies on **Android** (it labels the cancel button on
-`BiometricPrompt`). iOS's Face ID/Touch ID dialog has its own system-provided cancel
-button and ignores this value — pass a localized string regardless, since Android still
-needs it.
+`negativeButtonText` only applies on **Android**, and only when `allowDeviceCredential`
+is `false` (it labels the cancel button on `BiometricPrompt`; Android forbids a custom
+negative button once the device PIN/pattern/password fallback is enabled, since the
+system supplies its own "use PIN" affordance instead). iOS's Face ID/Touch ID dialog has
+its own system-provided cancel button and ignores this value — pass a localized string
+regardless, since Android still needs it.
 
 ### Checking availability
 
@@ -118,6 +120,39 @@ needs it.
 - `noHardware` — no biometric sensor on this device (or it's permanently disabled).
 - `notEnrolled` — hardware present but nothing enrolled yet; send the user to OS settings.
 - `unknown` — the platform returned something this plugin doesn't recognize.
+
+Call `getAvailableBiometrics()` to find out *which* sensor is enrolled, for adaptive UI
+(e.g. showing a Face ID vs. fingerprint icon):
+
+```dart
+final types = await vault.getAvailableBiometrics(); // e.g. [BiometricType.face]
+```
+
+### Falling back to the device PIN/pattern/password
+
+Pass `allowDeviceCredential: true` to `saveSecret`/`readSecret` to let the user
+authenticate with their device credential when biometrics aren't usable (not enrolled,
+sensor dirty, etc.) instead of only ever offering biometrics:
+
+```dart
+await vault.saveSecret(
+  key: 'login',
+  secret: 'p@ss',
+  reason: 'Authenticate to save your password',
+  negativeButtonText: 'Cancel',
+  allowDeviceCredential: true,
+);
+```
+
+This is only honored on **Android 11+ (API 30+)**; on older Android it's ignored and the
+call stays biometric-only, since combining the device credential fallback with the
+hardware-backed crypto key isn't supported by the platform below that version.
+
+### Cancelling a prompt
+
+```dart
+final cancelled = await vault.stopAuthentication(); // true if a prompt was showing
+```
 
 ### Error handling
 
@@ -137,9 +172,14 @@ try {
     // Biometric enrollment changed since the save — drop your "biometrics
     // enabled" flag and ask the user to re-enable.
   } else if (e.isLockedOut) {
-    // Too many failed attempts — sensor temporarily locked.
+    // Too many failed attempts — sensor temporarily locked, try again shortly.
+  } else if (e.isLockedOutPermanently) {
+    // Won't clear on its own — the user must unlock with their device
+    // PIN/pattern/password first.
   } else if (e.isNoData) {
     // readSecret was called for a key with nothing saved.
+  } else if (e.isAuthInProgress) {
+    // Another saveSecret/readSecret call already has a prompt showing.
   }
 }
 ```

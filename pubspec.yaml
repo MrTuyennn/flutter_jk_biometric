@@ -1,6 +1,6 @@
 name: flutter_jk_biometric
 description: "Store a secret behind the device's biometric sensor (Face ID/Touch ID/fingerprint) using hardware-backed Keystore/Keychain encryption."
-version: 1.0.0
+version: 1.0.1
 homepage: https://github.com/MrTuyennn/flutter_jk_biometric
 repository: https://github.com/MrTuyennn/flutter_jk_biometric
 issue_tracker: https://github.com/MrTuyennn/flutter_jk_biometric/issues

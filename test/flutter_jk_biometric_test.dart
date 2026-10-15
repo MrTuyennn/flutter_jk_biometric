@@ -8,7 +8,9 @@ class MockFlutterJkBiometricPlatform
     with MockPlatformInterfaceMixin
     implements FlutterJkBiometricPlatform {
   BiometricAvailability availability = BiometricAvailability.available;
+  List<BiometricType> availableBiometrics = [BiometricType.fingerprint];
   bool hasSecretResult = false;
+  bool stopAuthenticationResult = false;
   String? savedSecret;
   final List<String> calls = [];
 
@@ -16,11 +18,16 @@ class MockFlutterJkBiometricPlatform
   Future<BiometricAvailability> checkAvailability() async => availability;
 
   @override
+  Future<List<BiometricType>> getAvailableBiometrics() async =>
+      availableBiometrics;
+
+  @override
   Future<void> saveSecret({
     required String key,
     required String secret,
     required String reason,
     required String negativeButtonText,
+    bool allowDeviceCredential = false,
   }) async {
     calls.add('saveSecret');
     savedSecret = secret;
@@ -31,6 +38,7 @@ class MockFlutterJkBiometricPlatform
     required String key,
     required String reason,
     required String negativeButtonText,
+    bool allowDeviceCredential = false,
   }) async {
     calls.add('readSecret');
     return savedSecret ??
@@ -48,6 +56,12 @@ class MockFlutterJkBiometricPlatform
     calls.add('deleteSecret');
     savedSecret = null;
   }
+
+  @override
+  Future<bool> stopAuthentication() async {
+    calls.add('stopAuthentication');
+    return stopAuthenticationResult;
+  }
 }
 
 void main() {
@@ -64,6 +78,7 @@ void main() {
     const vault = FlutterJkBiometric();
 
     expect(await vault.checkAvailability(), BiometricAvailability.available);
+    expect(await vault.getAvailableBiometrics(), [BiometricType.fingerprint]);
 
     await vault.saveSecret(
       key: 'login',
@@ -84,6 +99,15 @@ void main() {
     expect(await vault.hasSecret(key: 'login'), isTrue);
 
     await vault.deleteSecret(key: 'login');
-    expect(fakePlatform.calls, ['saveSecret', 'readSecret', 'deleteSecret']);
+
+    fakePlatform.stopAuthenticationResult = true;
+    expect(await vault.stopAuthentication(), isTrue);
+
+    expect(fakePlatform.calls, [
+      'saveSecret',
+      'readSecret',
+      'deleteSecret',
+      'stopAuthentication',
+    ]);
   });
 }

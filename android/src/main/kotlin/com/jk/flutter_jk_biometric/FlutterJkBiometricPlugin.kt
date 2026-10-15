@@ -2,6 +2,7 @@ package com.jk.flutter_jk_biometric
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
@@ -37,6 +38,13 @@ class FlutterJkBiometricPlugin :
     private lateinit var applicationContext: Context
     private var activity: FragmentActivity? = null
 
+    // Only one BiometricPrompt can be shown at a time; also lets us fail the
+    // Dart-side Future instead of leaving it pending if the host activity is
+    // torn down mid-prompt (onAuthenticationError is not guaranteed to fire
+    // in that case).
+    private var pendingPrompt: BiometricPrompt? = null
+    private var pendingResult: Result? = null
+
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         applicationContext = flutterPluginBinding.applicationContext
         channel = MethodChannel(flutterPluginBinding.binaryMessenger, CHANNEL_NAME)
@@ -60,12 +68,27 @@ class FlutterJkBiometricPlugin :
     }
 
     override fun onDetachedFromActivity() {
+        cancelPendingAuthentication(
+            "ACTIVITY_DETACHED",
+            "Host activity was detached while a biometric prompt was active",
+        )
         activity = null
+    }
+
+    /** Returns whether a pending prompt was actually cancelled. */
+    private fun cancelPendingAuthentication(code: String, message: String): Boolean {
+        val hadPending = pendingResult != null
+        pendingPrompt?.cancelAuthentication()
+        pendingPrompt = null
+        pendingResult?.error(code, message, null)
+        pendingResult = null
+        return hadPending
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
         when (call.method) {
             "checkAvailability" -> result.success(checkAvailability().name)
+            "getAvailableBiometrics" -> result.success(getAvailableBiometrics())
             "saveSecret" -> saveSecret(call, result)
             "readSecret" -> readSecret(call, result)
             "hasSecret" -> result.success(hasSecret(call.requireArg("key")))
@@ -73,6 +96,12 @@ class FlutterJkBiometricPlugin :
                 deleteSecret(call.requireArg("key"))
                 result.success(null)
             }
+            "stopAuthentication" -> result.success(
+                cancelPendingAuthentication(
+                    "USER_CANCELLED",
+                    "Authentication was cancelled programmatically",
+                ),
+            )
             else -> result.notImplemented()
         }
     }
@@ -93,6 +122,21 @@ class FlutterJkBiometricPlugin :
             BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED -> Availability.notEnrolled
             else -> Availability.unknown
         }
+    }
+
+    // androidx.biometric has no public API for "which sensor type is enrolled" —
+    // PackageManager feature flags are the same approach local_auth uses.
+    private fun getAvailableBiometrics(): List<String> {
+        val pm = applicationContext.packageManager
+        val types = mutableListOf<String>()
+        if (pm.hasSystemFeature(PackageManager.FEATURE_FINGERPRINT)) types.add("fingerprint")
+        if (android.os.Build.VERSION.SDK_INT >= 29 && pm.hasSystemFeature(PackageManager.FEATURE_FACE)) {
+            types.add("face")
+        }
+        if (android.os.Build.VERSION.SDK_INT >= 29 && pm.hasSystemFeature(PackageManager.FEATURE_IRIS)) {
+            types.add("iris")
+        }
+        return types
     }
 
     private fun prefs(): SharedPreferences =
@@ -116,8 +160,28 @@ class FlutterJkBiometricPlugin :
             .apply()
     }
 
-    /** Creates the key on first use; returns the existing one otherwise. */
-    private fun getOrCreateSecretKey(alias: String): SecretKey {
+    // Combining DEVICE_CREDENTIAL with CryptoObject-based authentication is
+    // only supported from API 30 onward; below that we silently fall back to
+    // biometric-only so the prompt's allowed authenticators and the
+    // Keystore key's authorized auth types never disagree.
+    private fun useDeviceCredential(allowDeviceCredential: Boolean) =
+        allowDeviceCredential && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R
+
+    private fun allowedAuthenticators(allowDeviceCredential: Boolean) =
+        if (useDeviceCredential(allowDeviceCredential)) {
+            BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                BiometricManager.Authenticators.DEVICE_CREDENTIAL
+        } else {
+            BiometricManager.Authenticators.BIOMETRIC_STRONG
+        }
+
+    /**
+     * Creates the key on first use; returns the existing one otherwise. Note
+     * that [allowDeviceCredential] only affects the auth types a *new* key is
+     * created with — changing it for a `key` that already has a Keystore
+     * entry has no effect until that entry is deleted and recreated.
+     */
+    private fun getOrCreateSecretKey(alias: String, allowDeviceCredential: Boolean): SecretKey {
         (keyStore().getKey(alias, null) as? SecretKey)?.let { return it }
 
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
@@ -131,7 +195,12 @@ class FlutterJkBiometricPlugin :
             .setUserAuthenticationRequired(true)
 
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-            specBuilder.setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
+            val authType = if (useDeviceCredential(allowDeviceCredential)) {
+                KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL
+            } else {
+                KeyProperties.AUTH_BIOMETRIC_STRONG
+            }
+            specBuilder.setUserAuthenticationParameters(0, authType)
         } else {
             @Suppress("DEPRECATION")
             specBuilder.setUserAuthenticationValidityDurationSeconds(-1)
@@ -144,10 +213,18 @@ class FlutterJkBiometricPlugin :
     }
 
     private fun saveSecret(call: MethodCall, result: Result) {
+        if (pendingResult != null) {
+            return result.error(
+                "AUTH_IN_PROGRESS",
+                "A biometric prompt is already in progress",
+                null,
+            )
+        }
         val key = call.requireArg("key")
         val secret = call.requireArg("secret")
         val reason = call.requireArg("reason")
         val negativeButtonText = call.requireArg("negativeButtonText")
+        val allowDeviceCredential = call.argument<Boolean>("allowDeviceCredential") ?: false
         val host = activity ?: return result.error(
             "NO_ACTIVITY",
             "No foreground activity to show the biometric prompt",
@@ -156,7 +233,7 @@ class FlutterJkBiometricPlugin :
 
         val cipher = try {
             Cipher.getInstance("AES/GCM/NoPadding").apply {
-                init(Cipher.ENCRYPT_MODE, getOrCreateSecretKey(aliasFor(key)))
+                init(Cipher.ENCRYPT_MODE, getOrCreateSecretKey(aliasFor(key), allowDeviceCredential))
             }
         } catch (e: KeyPermanentlyInvalidatedException) {
             deleteSecret(key)
@@ -169,7 +246,9 @@ class FlutterJkBiometricPlugin :
             host = host,
             reason = reason,
             negativeButtonText = negativeButtonText,
+            allowDeviceCredential = allowDeviceCredential,
             cryptoObject = BiometricPrompt.CryptoObject(cipher),
+            result = result,
             onSuccess = { authenticatedCipher ->
                 try {
                     val encrypted = authenticatedCipher.doFinal(secret.toByteArray(Charsets.UTF_8))
@@ -187,9 +266,17 @@ class FlutterJkBiometricPlugin :
     }
 
     private fun readSecret(call: MethodCall, result: Result) {
+        if (pendingResult != null) {
+            return result.error(
+                "AUTH_IN_PROGRESS",
+                "A biometric prompt is already in progress",
+                null,
+            )
+        }
         val key = call.requireArg("key")
         val reason = call.requireArg("reason")
         val negativeButtonText = call.requireArg("negativeButtonText")
+        val allowDeviceCredential = call.argument<Boolean>("allowDeviceCredential") ?: false
 
         val ciphertextB64 = prefs().getString(ciphertextPrefKey(key), null)
         val ivB64 = prefs().getString(ivPrefKey(key), null)
@@ -220,7 +307,9 @@ class FlutterJkBiometricPlugin :
             host = host,
             reason = reason,
             negativeButtonText = negativeButtonText,
+            allowDeviceCredential = allowDeviceCredential,
             cryptoObject = BiometricPrompt.CryptoObject(cipher),
+            result = result,
             onSuccess = { authenticatedCipher ->
                 try {
                     val plaintext = authenticatedCipher.doFinal(ciphertextB64.fromBase64())
@@ -237,7 +326,9 @@ class FlutterJkBiometricPlugin :
         host: FragmentActivity,
         reason: String,
         negativeButtonText: String,
+        allowDeviceCredential: Boolean,
         cryptoObject: BiometricPrompt.CryptoObject,
+        result: Result,
         onSuccess: (Cipher) -> Unit,
         onError: (String, String) -> Unit,
     ) {
@@ -246,6 +337,8 @@ class FlutterJkBiometricPlugin :
             ContextCompat.getMainExecutor(applicationContext),
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    pendingPrompt = null
+                    pendingResult = null
                     val cipher = result.cryptoObject?.cipher
                     if (cipher == null) {
                         onError("SYSTEM_ERROR", "Missing crypto object after authentication")
@@ -255,14 +348,17 @@ class FlutterJkBiometricPlugin :
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    pendingPrompt = null
+                    pendingResult = null
                     val code = when (errorCode) {
                         BiometricPrompt.ERROR_USER_CANCELED,
                         BiometricPrompt.ERROR_NEGATIVE_BUTTON,
                         BiometricPrompt.ERROR_CANCELED,
                         -> "USER_CANCELLED"
                         BiometricPrompt.ERROR_LOCKOUT,
-                        BiometricPrompt.ERROR_LOCKOUT_PERMANENT,
                         -> "LOCKED_OUT"
+                        BiometricPrompt.ERROR_LOCKOUT_PERMANENT,
+                        -> "LOCKED_OUT_PERMANENTLY"
                         else -> "SYSTEM_ERROR"
                     }
                     onError(code, errString.toString())
@@ -274,13 +370,19 @@ class FlutterJkBiometricPlugin :
             },
         )
 
-        val promptInfo = BiometricPrompt.PromptInfo.Builder()
+        val promptInfoBuilder = BiometricPrompt.PromptInfo.Builder()
             .setTitle(reason)
-            .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
-            .setNegativeButtonText(negativeButtonText)
-            .build()
+            .setAllowedAuthenticators(allowedAuthenticators(allowDeviceCredential))
 
-        prompt.authenticate(promptInfo, cryptoObject)
+        // A negative button and DEVICE_CREDENTIAL are mutually exclusive —
+        // the system's own "use PIN" affordance replaces it.
+        if (!useDeviceCredential(allowDeviceCredential)) {
+            promptInfoBuilder.setNegativeButtonText(negativeButtonText)
+        }
+
+        pendingPrompt = prompt
+        pendingResult = result
+        prompt.authenticate(promptInfoBuilder.build(), cryptoObject)
     }
 
     private fun ByteArray.toBase64(): String = Base64.encodeToString(this, Base64.NO_WRAP)

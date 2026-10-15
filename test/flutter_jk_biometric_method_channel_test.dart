@@ -55,7 +55,27 @@ void main() {
       'secret': 'p@ss',
       'reason': 'Xác thực',
       'negativeButtonText': 'Hủy',
+      'allowDeviceCredential': false,
     });
+  });
+
+  test('saveSecret forwards allowDeviceCredential when set', () async {
+    MethodCall? captured;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          captured = call;
+          return null;
+        });
+
+    await platform.saveSecret(
+      key: 'login',
+      secret: 'p@ss',
+      reason: 'Xác thực',
+      negativeButtonText: 'Hủy',
+      allowDeviceCredential: true,
+    );
+
+    expect(captured?.arguments['allowDeviceCredential'], isTrue);
   });
 
   test(
@@ -91,5 +111,25 @@ void main() {
         .setMockMethodCallHandler(channel, (call) async => null);
 
     expect(await platform.hasSecret(key: 'login'), isFalse);
+  });
+
+  test('getAvailableBiometrics maps native strings to the enum', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          channel,
+          (call) async => ['fingerprint', 'something_new'],
+        );
+
+    expect(await platform.getAvailableBiometrics(), [
+      BiometricType.fingerprint,
+      BiometricType.unknown,
+    ]);
+  });
+
+  test('stopAuthentication defaults to false when the platform returns null', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async => null);
+
+    expect(await platform.stopAuthentication(), isFalse);
   });
 }

@@ -4,7 +4,7 @@
 #
 Pod::Spec.new do |s|
   s.name             = 'flutter_jk_biometric'
-  s.version          = '1.0.0'
+  s.version          = '1.0.1'
   s.summary          = 'Store a secret behind the device biometric sensor (Face ID/Touch ID/fingerprint).'
   s.description      = <<-DESC
 Stores a secret string behind a hardware-backed biometric prompt (Face ID/Touch ID on iOS, BiometricPrompt on Android).
